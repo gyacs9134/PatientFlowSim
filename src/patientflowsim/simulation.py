@@ -14,7 +14,7 @@ class SimulationResult:
 def run_simulation(config: SimulationConfig) -> SimulationResult:
     """Run one complete synthetic clinic day, including post-closing work."""
     config.validate(); env=simpy.Environment(); rng=np.random.default_rng(config.simulation.random_seed); log=EventLog(); patients=generate_patients(config,rng); res=config.resources
-    check=simpy.Resource(env,res.check_in_staff); triage=simpy.Resource(env,res.triage_nurses); lab=simpy.Resource(env,res.laboratory_capacity); imaging=simpy.Resource(env,res.imaging_capacity); doctors=simpy.PriorityResource(env,res.doctors); seats=simpy.Container(env,capacity=res.waiting_area_seats,init=res.waiting_area_seats)
+    check=simpy.Resource(env,res.check_in_staff); triage=simpy.Resource(env,res.triage_nurses); lab=simpy.Resource(env,res.laboratory_capacity); imaging=simpy.Resource(env,res.imaging_capacity); doctors=simpy.PriorityResource(env,res.doctors); seats=simpy.Container(env,capacity=res.waiting_area_seats,init=res.waiting_area_seats) if res.waiting_area_seats else None
     history=[]; busy={x:0. for x in ['check_in','triage','doctors','laboratory','imaging']}
     def sample(stage):
         s=config.service_times[stage]; return max(s.minimum, s.mean if s.kind=='fixed' else (rng.normal(s.mean,s.std) if s.kind=='normal' else rng.lognormal(np.log(max(s.mean,.01)),s.std)))
@@ -24,12 +24,12 @@ def run_simulation(config: SimulationConfig) -> SimulationResult:
         with resource.request(priority=priority) if isinstance(resource,simpy.PriorityResource) else resource.request() as req:
             yield req; setattr(patient,start,env.now); log.add(env.now,patient,event_prefix+'_started',department,len(resource.queue),resource.count); duration=sample(stage); busy[department]+=duration; yield env.timeout(duration); setattr(patient,end,env.now); log.add(env.now,patient,event_prefix+'_completed',department,len(resource.queue),resource.count)
     def seat(patient, which):
-        if seats.level>=1:
+        if seats is not None and seats.level>=1:
             yield seats.get(1); setattr(patient,which,True); log.add(env.now,patient,'seat_acquired','waiting_area',resource_in_use=res.waiting_area_seats-seats.level)
             return True
         setattr(patient,which,False); change(patient,'no_seat_'+which,-config.satisfaction_rules['no_seat_penalty'],env.now); log.add(env.now,patient,'no_seat_available','waiting_area'); return False
     def release(patient, held):
-        if held: yield seats.put(1); log.add(env.now,patient,'seat_released','waiting_area',resource_in_use=res.waiting_area_seats-seats.level)
+        if held and seats is not None: yield seats.put(1); log.add(env.now,patient,'seat_released','waiting_area',resource_in_use=res.waiting_area_seats-seats.level)
     def journey(p):
         yield env.timeout(p.actual_arrival_time)
         if p.no_show: log.add(env.now,p,'no_show','clinic'); return
