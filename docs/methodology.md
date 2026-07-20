@@ -1,0 +1,2 @@
+# Methodology
+The model is a discrete-event simulation: a SimPy environment advances to arrivals, queue admissions, service completions, examination returns, and discharge. A seeded NumPy generator creates appointments and early/late/no-show outcomes. SimPy resources represent staff and equipment; queue snapshots are logged on requests. Busy service minutes divided by capacity times simulated duration produce utilisation. Scenario runs load different YAML overrides with the same default seed, making comparisons more attributable to operational changes.

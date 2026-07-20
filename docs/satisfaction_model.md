@@ -1,0 +1,2 @@
+# Satisfaction model
+Each arriving patient begins at 80. Configurable rules deduct for doctor-wait thresholds, a 60-minute wait, no seat, long triage/examination/return waits, and long visits; bonuses reward prompt consultation and a short visit. Events are named and applied once, except newly crossed wait thresholds. Scores are clamped from 0 to 100. This is not clinically validated and reducing subjective experience to one score is inherently limited.

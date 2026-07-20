@@ -1,0 +1,10 @@
+Baseline: {}
+Additional triage nurse: {resources: {triage_nurses: 3}}
+Additional doctor: {resources: {doctors: 6}}
+Additional laboratory resource: {resources: {laboratory_capacity: 3}}
+Additional imaging resource: {resources: {imaging_capacity: 2}}
+Increased waiting-area seating: {resources: {waiting_area_seats: 50}}
+Reduced appointments during peak hours: {patients: {appointment_distribution: morning_heavy, appointment_interval_minutes: 6}}
+Higher examination demand: {examinations: {laboratory_probability: 0.35, imaging_probability: 0.20}}
+Dedicated capacity for return consultations: {queue_policy: {consultation_policy: reserved_return, reserved_return_doctors: 1}}
+Priority for return-consultation patients: {queue_policy: {consultation_policy: return_priority}}

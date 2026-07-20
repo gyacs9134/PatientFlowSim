@@ -1,0 +1,2 @@
+# Assumptions
+The MVP has one general outpatient department and scheduled synthetic outpatients. Defaults are one check-in staff member, two triage nurses, five doctors, laboratory capacity two, and imaging capacity one. Examination probabilities are configurable. Staff behaviour is simplified: no breaks, emergency cases, or clinical acuity. Doctors are shared by initial and return visits. No real data is used.
