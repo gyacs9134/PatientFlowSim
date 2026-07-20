@@ -1,0 +1,34 @@
+clinic:
+  opening_time: "08:00"
+  closing_time: "17:00"
+patients:
+  scheduled_count: 100
+  appointment_interval_minutes: 5
+  appointment_distribution: evenly_spaced
+  no_show_rate: 0.08
+  lateness_rate: 0.20
+  early_arrival_range: [0, 15]
+  late_arrival_range: [1, 30]
+resources:
+  check_in_staff: 1
+  triage_nurses: 2
+  doctors: 5
+  laboratory_capacity: 2
+  imaging_capacity: 1
+  waiting_area_seats: 30
+examinations:
+  laboratory_probability: 0.20
+  imaging_probability: 0.10
+queue_policy:
+  consultation_policy: shared_fifo
+  reserved_return_doctors: 0
+simulation:
+  random_seed: 42
+service_times:
+  first_check_in: {kind: normal, mean: 3, std: 0.5, minimum: 1}
+  triage: {kind: normal, mean: 6, std: 1, minimum: 2}
+  initial_consultation: {kind: normal, mean: 12, std: 2, minimum: 4}
+  laboratory: {kind: normal, mean: 15, std: 3, minimum: 5}
+  imaging: {kind: normal, mean: 25, std: 4, minimum: 10}
+  return_check_in: {kind: normal, mean: 2, std: 0.5, minimum: 1}
+  return_consultation: {kind: normal, mean: 8, std: 1.5, minimum: 3}

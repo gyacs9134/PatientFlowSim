@@ -1,0 +1,2 @@
+# Queue policies
+**Shared FIFO** treats initial and return consultations in arrival order and is the baseline. **Return priority** gives return patients a higher SimPy priority, potentially reducing repeat waiting but delaying new patients. **Reserved return capacity** is declared as a configuration option for operational planning; future versions can split doctor pools to enforce it. Choose policies according to fairness and service targets.
