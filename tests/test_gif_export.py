@@ -5,6 +5,7 @@ from io import BytesIO
 from PIL import Image
 import pytest
 
+import patientflowsim.gif_export as gif_export
 from patientflowsim.gif_export import GifExportConfig, render_gif, sampled_frame_times
 from patientflowsim.layout import load_layout
 
@@ -37,6 +38,15 @@ def test_gif_export_is_valid_non_empty_and_multiframe():
     assert image.n_frames > 1
 
 
+def test_gif_export_uses_pillow_when_imageio_is_missing(monkeypatch):
+    monkeypatch.setattr(gif_export, "imageio", None)
+    config = GifExportConfig(end_time=1, playback_speed=60, fps=10, width=320, height=240, max_frames=4)
+    data = render_gif(load_layout("config/default_layout.json"), _timeline(), config)
+    image = Image.open(BytesIO(data))
+    assert data.startswith((b"GIF87a", b"GIF89a"))
+    assert image.n_frames > 1
+
+
 def test_frame_sampling_obeys_configured_limit():
     config = GifExportConfig(end_time=1, playback_speed=1, fps=20, width=320, height=240, max_frames=7)
     assert len(sampled_frame_times(1, config)) == 7
@@ -46,4 +56,3 @@ def test_excessive_export_returns_clear_error():
     config = GifExportConfig(end_time=1, playback_speed=1, fps=20, width=1920, height=1080, max_frames=100)
     with pytest.raises(ValueError, match="too large"):
         sampled_frame_times(1, config)
-

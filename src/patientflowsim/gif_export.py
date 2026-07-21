@@ -8,8 +8,12 @@ from io import BytesIO
 from math import ceil
 from typing import Any, Callable
 
-import imageio.v2 as imageio
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import imageio.v2 as imageio
+except ModuleNotFoundError:  # Pillow remains a complete encoder fallback on minimal deployments.
+    imageio = None
 
 from .animation import frame_at_time
 from .layout import HospitalLayout
@@ -209,11 +213,24 @@ def render_gif(
         if progress_callback:
             progress_callback((index + 1) / len(times))
     output = BytesIO()
-    imageio.mimsave(
-        output,
-        [frame.convert("P", palette=Image.Palette.ADAPTIVE) for frame in frames],
-        format="GIF",
-        duration=1 / options.fps,
-        loop=0 if options.loop else 1,
-    )
+    palette_frames = [frame.convert("P", palette=Image.Palette.ADAPTIVE) for frame in frames]
+    if imageio is not None:
+        imageio.mimsave(
+            output,
+            palette_frames,
+            format="GIF",
+            duration=1 / options.fps,
+            loop=0 if options.loop else 1,
+        )
+    else:
+        save_options: dict[str, Any] = {
+            "format": "GIF",
+            "save_all": True,
+            "append_images": palette_frames[1:],
+            "duration": round(1000 / options.fps),
+            "disposal": 2,
+        }
+        if options.loop:
+            save_options["loop"] = 0
+        palette_frames[0].save(output, **save_options)
     return output.getvalue()
