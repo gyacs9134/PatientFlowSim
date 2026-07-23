@@ -1,6 +1,7 @@
-import type { Department, HospitalLayout, ResourceStation, Seat } from "./types";
+import type { Department, HospitalLayout, LayoutPoint, ResourceStation, Seat } from "./types";
 
-type Selection = { kind: "department"; value: Department } | { kind: "seat"; value: Seat } | { kind: "station"; value: ResourceStation } | null;
+type PointGroup = "entry_points" | "exit_points" | "queue_points";
+type Selection = { kind: "department"; value: Department } | { kind: "seat"; value: Seat } | { kind: "station"; value: ResourceStation } | { kind: "point"; group: PointGroup; value: LayoutPoint } | null;
 
 interface Props {
   selection: Selection;
@@ -8,6 +9,7 @@ interface Props {
   onDepartment: (value: Department) => void;
   onSeat: (value: Seat) => void;
   onStation: (value: ResourceStation) => void;
+  onPoint: (group: PointGroup, value: LayoutPoint) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }
@@ -15,8 +17,8 @@ interface Props {
 const NumberField = ({ label, value, onChange, min = 0 }: { label: string; value: number; onChange: (value: number) => void; min?: number }) =>
   <label>{label}<input type="number" min={min} step="0.1" value={Number(value.toFixed(3))} onChange={(event) => onChange(Number(event.target.value))} /></label>;
 
-export function PropertiesPanel({ selection, layout, onDepartment, onSeat, onStation, onDuplicate, onDelete }: Props) {
-  if (!selection) return <aside className="properties-panel"><h3>Properties</h3><p>Select a room, seat, or resource station.</p></aside>;
+export function PropertiesPanel({ selection, layout, onDepartment, onSeat, onStation, onPoint, onDuplicate, onDelete }: Props) {
+  if (!selection) return <aside className="properties-panel"><h3>Properties</h3><p>Select a room, seat, station, entrance, exit, or queue anchor.</p><hr /><h4>Canvas</h4><p>{layout.canvas_width_m.toFixed(1)} × {layout.canvas_height_m.toFixed(1)} metres</p><p>Grid {layout.grid_spacing_m} m</p></aside>;
   const actions = <div className="property-actions"><button onClick={onDuplicate}>Duplicate</button><button className="danger" onClick={onDelete}>Delete</button></div>;
   if (selection.kind === "department") {
     const value = selection.value;
@@ -40,6 +42,18 @@ export function PropertiesPanel({ selection, layout, onDepartment, onSeat, onSta
       <label>Waiting area<select value={value.waiting_area_id} onChange={(event) => onSeat({ ...value, waiting_area_id: event.target.value })}>{waiting.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
       <label className="check"><input type="checkbox" checked={value.available} onChange={(event) => onSeat({ ...value, available: event.target.checked })} /> Available</label>{actions}</aside>;
   }
+  if (selection.kind === "point") {
+    const value = selection.value;
+    return <aside className="properties-panel"><h3>{selection.group === "queue_points" ? "Queue anchor" : selection.group === "entry_points" ? "Entrance point" : "Exit point"}</h3>
+      <NumberField label="X (m)" value={value.x_m} onChange={(x_m) => onPoint(selection.group, { ...value, x_m: Math.min(x_m, layout.canvas_width_m) })} />
+      <NumberField label="Y (m)" value={value.y_m} onChange={(y_m) => onPoint(selection.group, { ...value, y_m: Math.min(y_m, layout.canvas_height_m) })} />
+      {selection.group === "queue_points" && <>
+        <label>Queue type<select value={value.point_type} onChange={(event) => onPoint(selection.group, { ...value, point_type: event.target.value })}>{["check_in", "triage", "initial_consultation", "laboratory", "imaging", "return_check_in", "return_consultation"].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label>Direction<select value={value.direction ?? "horizontal"} onChange={(event) => onPoint(selection.group, { ...value, direction: event.target.value as "horizontal" | "vertical" })}><option>horizontal</option><option>vertical</option></select></label>
+      </>}
+      <label>Department<select value={value.department_id ?? ""} onChange={(event) => onPoint(selection.group, { ...value, department_id: event.target.value || null })}><option value="">None</option>{layout.departments.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+      {actions}</aside>;
+  }
   const value = selection.value;
   return <aside className="properties-panel"><h3>Resource station</h3>
     <label>Label<input value={value.label} onChange={(event) => onStation({ ...value, label: event.target.value })} /></label>
@@ -48,4 +62,4 @@ export function PropertiesPanel({ selection, layout, onDepartment, onSeat, onSta
     <NumberField label="Y (m)" value={value.y_m} onChange={(y_m) => onStation({ ...value, y_m: Math.min(y_m, layout.canvas_height_m) })} />{actions}</aside>;
 }
 
-export type { Selection };
+export type { PointGroup, Selection };

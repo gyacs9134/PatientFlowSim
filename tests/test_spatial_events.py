@@ -54,6 +54,7 @@ def test_stable_queue_positions_are_ordered_and_repeatable():
     positions = [stable_queue_position(layout, "check_in", index) for index in range(5)]
     assert positions == [stable_queue_position(layout, "check_in", index) for index in range(5)]
     assert len(set(positions)) == 5
+    assert len({stable_queue_position(layout, "check_in", index) for index in range(300)}) == 300
 
 
 def test_conversion_is_reproducible_for_same_seed():
@@ -85,3 +86,41 @@ def test_no_patients_are_visible_before_their_arrival(timeline):
     first_arrival = min(patient["keyframes"][0]["time"] for patient in timeline["patients"])
     if first_arrival > 0:
         assert not frame_at_time(timeline, first_arrival - 0.001)["patients"]
+
+
+def test_animation_serialises_same_time_events_and_never_teleports(timeline):
+    for patient in timeline["patients"]:
+        frames = patient["keyframes"]
+        assert all(second["time"] >= first["movement_end_time"] for first, second in zip(frames, frames[1:]))
+        for first, second in zip(frames, frames[1:]):
+            moved = (first["x_m"], first["y_m"]) != (second["x_m"], second["y_m"])
+            if moved:
+                assert second["travel_duration_min"] > 0
+                assert second["movement_end_time"] > second["movement_start_time"]
+                assert len(second["path"]) >= 2
+
+
+def test_patients_visibly_enter_and_examination_patients_return(timeline):
+    first = timeline["patients"][0]["keyframes"][0]
+    assert first["source_location"]["x_m"] < 0
+    assert len(first["path"]) >= 3
+    examination_patient = next(
+        patient
+        for patient in timeline["patients"]
+        if patient["details"]["examination_type"] != "none"
+    )
+    returned = next(frame for frame in examination_patient["keyframes"] if frame["event_type"] == "patient_returned")
+    assert returned["state"] == "returning_examination"
+    assert returned["queue_type"] == "return_check_in"
+
+
+def test_seat_is_released_when_consultation_starts():
+    result = run_simulation(load_config("config/default_config.yaml"))
+    events = result.events
+    for patient_id, patient_events in events.groupby("patient_id"):
+        releases = patient_events.loc[patient_events["event_type"] == "seat_released", "time"].tolist()
+        starts = patient_events.loc[
+            patient_events["event_type"].isin(["initial_consultation_started", "return_consultation_started"]),
+            "time",
+        ].tolist()
+        assert releases == starts

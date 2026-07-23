@@ -75,8 +75,25 @@ export interface Keyframe {
   satisfaction?: number;
   seat_id?: string | null;
   travel_duration_min?: number;
+  simulation_timestamp?: number;
+  movement_start_time?: number;
+  movement_end_time?: number;
+  source_location?: WorldPoint;
+  destination_location?: WorldPoint;
+  path?: WorldPoint[];
+  queue_position?: number | null;
+  queue_type?: string | null;
+  queue_entered_time?: number | null;
+  resource_station_id?: string | null;
+  event_type?: string;
   satisfaction_event?: { event: string; score_change: number; time: number };
   [key: string]: unknown;
+}
+
+export interface WorldPoint {
+  x_m: number;
+  y_m: number;
+  department_id?: string | null;
 }
 
 export interface AnimatedEntity {
@@ -107,6 +124,41 @@ export interface RenderedEntity extends AnimatedEntity, Keyframe {
 export interface ComponentArgs {
   layout: HospitalLayout;
   timeline: Timeline;
-  mode: "editor" | "simulation";
+  mode: "preview" | "editor" | "simulation";
   height: number;
+  autoPlay?: boolean;
+  startTime?: number;
+  endTime?: number;
+  playbackSpeed?: number;
+  showFinish?: boolean;
+}
+
+export type CongestionStatus = "normal" | "busy" | "congested" | "critical";
+
+export interface QueueSnapshot {
+  queueType: string;
+  label: string;
+  departmentId: string | null;
+  queueLength: number;
+  longestWait: number;
+}
+
+export interface DepartmentPressure {
+  departmentId: string;
+  queueLength: number;
+  longestWait: number;
+  capacity: number;
+  utilisation: number;
+  status: CongestionStatus;
+}
+
+export interface OverlaySettings {
+  congestion: boolean;
+  queueLabels: boolean;
+  flowTrails: boolean;
+  seatOccupancy: boolean;
+  averageWait: boolean;
+  utilisation: boolean;
+  satisfaction: boolean;
+  patientIds: boolean;
 }

@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # Pillow remains a complete encoder fallback on min
     imageio = None
 
 from .animation import frame_at_time
+from .analysis import congestion_status
 from .layout import HospitalLayout
 
 
@@ -94,14 +95,66 @@ def _world(x_m: float, y_m: float, scale: float, offset_x: float, offset_y: floa
     return offset_x + x_m * scale, offset_y + y_m * scale
 
 
-def _draw_layout(draw: ImageDraw.ImageDraw, layout: HospitalLayout, config: GifExportConfig, scale: float, ox: float, oy: float) -> None:
+def _current_utilisation(timeline: dict[str, Any], resource: str, time_min: float) -> float:
+    capacity = max(1, int(timeline.get("resource_capacity", {}).get(resource, 1)))
+    if time_min <= 0:
+        return 0.0
+    busy = sum(
+        max(0.0, min(time_min, float(end)) - float(start))
+        for start, end in timeline.get("resource_intervals", {}).get(resource, [])
+        if float(start) < time_min
+    )
+    return min(1.0, busy / (capacity * time_min))
+
+
+def _draw_layout(
+    draw: ImageDraw.ImageDraw,
+    layout: HospitalLayout,
+    timeline: dict[str, Any],
+    frame: dict[str, Any],
+    config: GifExportConfig,
+    scale: float,
+    ox: float,
+    oy: float,
+) -> None:
     canvas = (*_world(0, 0, scale, ox, oy), *_world(layout.canvas_width_m, layout.canvas_height_m, scale, ox, oy))
     draw.rectangle(canvas, fill="#f8fafc", outline="#0f172a", width=2)
+    queues: dict[str, tuple[int, float]] = {}
+    for point in layout.queue_points:
+        waiting = [
+            patient
+            for patient in frame["patients"]
+            if patient.get("queue_type") == point.point_type and patient.get("queue_position") is not None
+        ]
+        longest = max(
+            (float(frame["time"]) - float(patient.get("queue_entered_time", frame["time"])) for patient in waiting),
+            default=0.0,
+        )
+        queues[point.department_id or ""] = (
+            queues.get(point.department_id or "", (0, 0.0))[0] + len(waiting),
+            max(queues.get(point.department_id or "", (0, 0.0))[1], longest),
+        )
+    status_colours = {"normal": "#64748b", "busy": "#d97706", "congested": "#ea580c", "critical": "#dc2626"}
+    resource_for_type = {
+        "check-in": "check_in",
+        "triage": "triage_nurses",
+        "consultation room": "doctors",
+        "laboratory": "laboratory",
+        "imaging": "imaging",
+    }
     for department in layout.departments:
         x1, y1 = _world(department.x_m, department.y_m, scale, ox, oy)
         x2, y2 = _world(department.x_m + department.width_m, department.y_m + department.height_m, scale, ox, oy)
-        draw.rectangle((x1, y1, x2, y2), fill=_hex(department.fill, "#e2e8f0"), outline=_hex(department.border, "#475569"), width=2)
+        queue_length, longest_wait = queues.get(department.id, (0, 0.0))
+        resource = resource_for_type.get(department.department_type, "")
+        capacity = max(1, int(timeline.get("resource_capacity", {}).get(resource, 1)))
+        utilisation = _current_utilisation(timeline, resource, float(frame["time"])) if resource else 0.0
+        status = congestion_status(queue_length, longest_wait, capacity, utilisation)
+        outline = status_colours[status] if status != "normal" else _hex(department.border, "#475569")
+        draw.rectangle((x1, y1, x2, y2), fill=_hex(department.fill, "#e2e8f0"), outline=outline, width=4 if status == "critical" else 2)
         draw.text((x1 + 4, y1 + 3), department.name, fill="#0f172a", font=_font(11))
+        if queue_length:
+            draw.text((x1 + 4, y1 + 18), f"Queue {queue_length} · {longest_wait:.0f} min", fill=outline, font=_font(9))
         if config.include_dimension_labels:
             draw.text((x1 + 4, y2 - 15), f"{department.width_m:g}×{department.height_m:g} m", fill="#334155", font=_font(10))
 
@@ -179,7 +232,7 @@ def render_frame(layout: HospitalLayout, timeline: dict[str, Any], time_min: flo
     draw = ImageDraw.Draw(image)
     scale, ox, oy, _ = _geometry(layout, config)
     frame = frame_at_time(timeline, time_min)
-    _draw_layout(draw, layout, config, scale, ox, oy)
+    _draw_layout(draw, layout, timeline, frame, config, scale, ox, oy)
     _draw_seats(draw, frame["seats"], scale, ox, oy)
     colours = timeline.get("colours", layout.colour_settings)
     for staff in frame["staff"]:

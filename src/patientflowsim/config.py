@@ -33,6 +33,10 @@ class SimulationConfig:
         if self.resources.waiting_area_seats < 0: raise ValueError("Waiting-area seats cannot be negative")
         if self.clinic.closing_time <= self.clinic.opening_time: raise ValueError("Clinic closing time must be later than opening time")
         if self.queue_policy.consultation_policy not in {"shared_fifo","return_priority","reserved_return"}: raise ValueError("Unknown consultation policy")
+        if self.queue_policy.reserved_return_doctors < 0 or self.queue_policy.reserved_return_doctors >= self.resources.doctors:
+            raise ValueError("Reserved return doctors must be between 0 and one less than total doctors")
+        if self.queue_policy.consultation_policy == "reserved_return" and self.queue_policy.reserved_return_doctors < 1:
+            raise ValueError("Reserved return policy requires at least one reserved return doctor")
         for value in self.service_times.values(): value.validate()
     def to_dict(self) -> dict[str, Any]: return asdict(self)
 def load_config(path: str | Path = "config/default_config.yaml", satisfaction_path: str | Path = "config/satisfaction_rules.yaml") -> SimulationConfig:

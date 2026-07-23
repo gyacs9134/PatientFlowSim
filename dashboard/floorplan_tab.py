@@ -25,7 +25,8 @@ from patientflowsim.spatial_events import prepare_spatial_timeline
 LAYOUT_DIRECTORY = Path(__file__).resolve().parents[1] / "data" / "layouts"
 
 
-def _current_layout() -> HospitalLayout:
+def current_layout() -> HospitalLayout:
+    """Return the current validated layout stored in the Streamlit session."""
     if "floorplan_layout" not in st.session_state:
         st.session_state.floorplan_layout = load_layout()
     return st.session_state.floorplan_layout
@@ -38,7 +39,8 @@ def _safe_name(value: str) -> str:
     return name
 
 
-def _timeline(result: Any, layout: HospitalLayout) -> dict[str, Any] | None:
+def timeline_for_result(result: Any, layout: HospitalLayout) -> dict[str, Any] | None:
+    """Prepare or reuse the deterministic spatial timeline for a result/layout pair."""
     if result is None:
         return None
     signature = (
@@ -52,7 +54,8 @@ def _timeline(result: Any, layout: HospitalLayout) -> dict[str, Any] | None:
     return st.session_state.floorplan_timeline
 
 
-def _receive_editor_value(value: dict[str, Any] | None, layout: HospitalLayout) -> None:
+def receive_editor_value(value: dict[str, Any] | None, layout: HospitalLayout) -> None:
+    """Validate and store meaningful layout updates returned by the component."""
     if not value or value.get("type") != "layout_changed" or not isinstance(value.get("layout"), dict):
         return
     try:
@@ -65,7 +68,8 @@ def _receive_editor_value(value: dict[str, Any] | None, layout: HospitalLayout) 
         st.rerun()
 
 
-def _render_editor(layout: HospitalLayout, result: Any) -> None:
+def render_editor(layout: HospitalLayout, result: Any) -> None:
+    """Render the dedicated metre-based layout editor."""
     st.caption("All saved coordinates and dimensions are in metres. Wheel to zoom; drag empty canvas to pan; Shift-click for multi-selection.")
     for warning in layout.overlap_warnings():
         st.warning(warning)
@@ -73,31 +77,44 @@ def _render_editor(layout: HospitalLayout, result: Any) -> None:
         for warning in layout.station_capacity_warnings(result.config.resources):
             st.warning(warning)
     value = floorplan_component(layout, mode="editor", height=780, key="floorplan_editor_component")
-    _receive_editor_value(value, layout)
+    receive_editor_value(value, layout)
 
 
-def _render_simulation(layout: HospitalLayout, timeline: dict[str, Any] | None) -> None:
+def render_simulation(layout: HospitalLayout, timeline: dict[str, Any] | None) -> None:
     if timeline is None:
         st.info("Run the Python simulation first, then return here to replay its event log.")
         return
     st.caption("Playback runs locally in the component; it does not trigger one Streamlit rerun per frame.")
     value = floorplan_component(layout, timeline, mode="simulation", height=780, key="floorplan_simulation_component")
-    _receive_editor_value(value, layout)
+    receive_editor_value(value, layout)
 
 
-def _render_gif_export(layout: HospitalLayout, timeline: dict[str, Any] | None) -> None:
+def render_gif_export(
+    layout: HospitalLayout,
+    timeline: dict[str, Any] | None,
+    preset_ranges: dict[str, dict[str, float]] | None = None,
+) -> None:
+    """Render bounded GIF export controls and a download action."""
     if timeline is None:
         st.info("Run a simulation before exporting its animation.")
         return
     duration = float(timeline["duration"])
-    export_scope = st.radio("Export range", ["Complete simulation", "Selected time range"], horizontal=True)
+    range_labels = ["Complete simulation", "Selected time range"]
+    preset_labels = {
+        "peak_congestion": "Peak congestion period",
+        "examination_return_surge": "Examination return surge",
+        "final_hour": "Final hour",
+    }
+    if preset_ranges:
+        range_labels.extend(label for key, label in preset_labels.items() if key in preset_ranges)
+    export_scope = st.radio("Export range", range_labels, horizontal=True)
     first, second, third = st.columns(3)
     with first:
-        start_time = st.number_input("Start minute", 0.0, max(duration - 0.01, 0.0), 0.0, disabled=export_scope == "Complete simulation")
+        start_time = st.number_input("Start minute", 0.0, max(duration - 0.01, 0.0), 0.0, disabled=export_scope != "Selected time range")
         playback_speed = st.select_slider("Playback speed", options=[1, 2, 5, 10, 20, 30, 60], value=30)
         fps = st.selectbox("Output FPS", [10, 15, 20], index=0)
     with second:
-        end_time = st.number_input("End minute", 0.01, duration, duration, disabled=export_scope == "Complete simulation")
+        end_time = st.number_input("End minute", 0.01, duration, duration, disabled=export_scope != "Selected time range")
         width = st.selectbox("Width", [640, 800, 960, 1280], index=2)
         height = st.selectbox("Height", [360, 480, 640, 720], index=2)
     with third:
@@ -109,8 +126,14 @@ def _render_gif_export(layout: HospitalLayout, timeline: dict[str, Any] | None) 
     include_legend = option_columns[0].checkbox("Include legend", value=True)
     include_metrics = option_columns[1].checkbox("Include metrics overlay", value=True)
     include_satisfaction = option_columns[2].checkbox("Satisfaction labels", value=True)
-    actual_start = 0.0 if export_scope == "Complete simulation" else float(start_time)
-    actual_end = duration if export_scope == "Complete simulation" else float(end_time)
+    if export_scope == "Complete simulation":
+        actual_start, actual_end = 0.0, duration
+    elif export_scope == "Selected time range":
+        actual_start, actual_end = float(start_time), float(end_time)
+    else:
+        selected_key = next(key for key, label in preset_labels.items() if label == export_scope)
+        actual_start = float(preset_ranges[selected_key]["start"])  # type: ignore[index]
+        actual_end = float(preset_ranges[selected_key]["end"])  # type: ignore[index]
     config = GifExportConfig(
         start_time=actual_start,
         end_time=actual_end,
@@ -147,7 +170,8 @@ def _render_gif_export(layout: HospitalLayout, timeline: dict[str, Any] | None) 
         st.download_button("Download GIF", data=data, file_name="patientflowsim_animation.gif", mime="image/gif")
 
 
-def _render_layout_management(layout: HospitalLayout) -> None:
+def render_layout_management(layout: HospitalLayout) -> None:
+    """Render JSON import/export and saved-layout management."""
     LAYOUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     st.download_button("Export current layout JSON", layout_to_json(layout), file_name=f"{_safe_name(layout.name)}.json", mime="application/json")
     uploaded = st.file_uploader("Import layout JSON", type=["json"])
@@ -200,15 +224,14 @@ def _render_layout_management(layout: HospitalLayout) -> None:
 
 def render(result: Any = None) -> None:
     """Render the complete 2D floor-plan feature in one dashboard tab."""
-    layout = _current_layout()
-    timeline = _timeline(result, layout)
+    layout = current_layout()
+    timeline = timeline_for_result(result, layout)
     editor_tab, simulation_tab, gif_tab, management_tab = st.tabs(["Layout Editor", "Simulation View", "GIF Export", "Layout Management"])
     with editor_tab:
-        _render_editor(layout, result)
+        render_editor(layout, result)
     with simulation_tab:
-        _render_simulation(layout, timeline)
+        render_simulation(layout, timeline)
     with gif_tab:
-        _render_gif_export(layout, timeline)
+        render_gif_export(layout, timeline)
     with management_tab:
-        _render_layout_management(layout)
-
+        render_layout_management(layout)

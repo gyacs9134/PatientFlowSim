@@ -1,109 +1,154 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Konva from "konva";
 import { Circle, Group, Layer, Line, Rect, RegularPolygon, Stage, Text } from "react-konva";
 import type { KonvaEventObject } from "konva/lib/Node";
-import { clamp, entityAtTime } from "./geometry";
-import { TimelineControls } from "./TimelineControls";
-import type { HospitalLayout, RenderedEntity, Timeline } from "./types";
+import { CONGESTION_COLOURS } from "./congestion";
+import { clamp } from "./geometry";
+import type { DepartmentPressure, HospitalLayout, OverlaySettings, QueueSnapshot, RenderedEntity } from "./types";
 
 interface Props {
   layout: HospitalLayout;
-  timeline: Timeline;
+  patients: RenderedEntity[];
+  staff: RenderedEntity[];
+  queues: QueueSnapshot[];
+  pressures: Record<string, DepartmentPressure>;
   colours: Record<string, string>;
   highlight: string | null;
+  overlays: OverlaySettings;
+  selectedId: string | null;
+  fitSignal: number;
   time: number;
-  playing: boolean;
-  speed: number;
-  onTime: (time: number) => void;
-  onPlaying: (playing: boolean) => void;
-  onSpeed: (speed: number) => void;
+  onSelect: (id: string | null) => void;
+  onPause: () => void;
 }
 
-export function SimulationCanvas({ layout, timeline, colours, highlight, time, playing, speed, onTime, onPlaying, onSpeed }: Props) {
+interface StaticProps {
+  layout: HospitalLayout;
+  pixelsPerMetre: number;
+  zoom: number;
+  pressures: Record<string, DepartmentPressure>;
+  queues: QueueSnapshot[];
+  overlays: OverlaySettings;
+  occupancy: Record<string, number>;
+  satisfaction: Record<string, number>;
+}
+
+const StaticFloorPlan = memo(function StaticFloorPlan({ layout, pixelsPerMetre, zoom, pressures, queues, overlays, occupancy, satisfaction }: StaticProps) {
+  return <>
+    <Rect width={layout.canvas_width_m * pixelsPerMetre} height={layout.canvas_height_m * pixelsPerMetre} fill="#f8fafc" stroke="#334155" strokeWidth={2 / zoom} cornerRadius={4} />
+    {layout.departments.map((department) => {
+      const pressure = pressures[department.id];
+      const border = overlays.congestion && pressure?.status !== "normal" ? CONGESTION_COLOURS[pressure.status] : department.border;
+      const details = [
+        overlays.seatOccupancy && occupancy[department.id] !== undefined ? `Occupancy ${occupancy[department.id]}` : "",
+        overlays.averageWait && pressure?.longestWait ? `Longest wait ${pressure.longestWait.toFixed(0)}m` : "",
+        overlays.utilisation && pressure?.utilisation ? `Util ${(pressure.utilisation * 100).toFixed(0)}%` : "",
+        overlays.satisfaction && satisfaction[department.id] !== undefined ? `Sat ${satisfaction[department.id].toFixed(0)}` : "",
+      ].filter(Boolean).join(" · ");
+      return <Group key={department.id}>
+        <Rect
+          x={department.x_m * pixelsPerMetre} y={department.y_m * pixelsPerMetre}
+          width={department.width_m * pixelsPerMetre} height={department.height_m * pixelsPerMetre}
+          fill={department.fill} opacity={pressure?.status === "critical" && overlays.congestion ? .9 : 1}
+          stroke={border} strokeWidth={(pressure?.status === "critical" && overlays.congestion ? 4 : 1.7) / zoom}
+          shadowColor={pressure?.status === "critical" && overlays.congestion ? border : undefined}
+          shadowBlur={pressure?.status === "critical" && overlays.congestion ? 8 / zoom : 0}
+          cornerRadius={3 / zoom}
+        />
+        <Text x={(department.x_m + .16) * pixelsPerMetre} y={(department.y_m + .14) * pixelsPerMetre} width={(department.width_m - .3) * pixelsPerMetre} text={department.name} fontSize={Math.max(9, pixelsPerMetre * .25)} fontStyle="bold" fill="#172033" listening={false} />
+        {details && <Text x={(department.x_m + .16) * pixelsPerMetre} y={(department.y_m + .58) * pixelsPerMetre} width={(department.width_m - .3) * pixelsPerMetre} text={details} fontSize={Math.max(7, pixelsPerMetre * .16)} fill="#526178" listening={false} />}
+      </Group>;
+    })}
+    {layout.queue_points.map((point) => {
+      const queue = queues.find((item) => item.queueType === point.point_type);
+      if (!overlays.queueLabels || !queue || queue.queueLength === 0) return null;
+      const text = `${queue.label}\nQueue ${queue.queueLength} · longest ${queue.longestWait.toFixed(0)} min`;
+      const width = 4.2 * pixelsPerMetre;
+      return <Group key={point.id} x={point.x_m * pixelsPerMetre} y={point.y_m * pixelsPerMetre}>
+        <Line points={[-6 / zoom, 0, 6 / zoom, 0]} stroke="#475569" strokeWidth={2 / zoom} dash={[3 / zoom, 3 / zoom]} />
+        <Rect x={8 / zoom} y={-18 / zoom} width={width} height={34 / zoom} fill="#ffffff" opacity={.94} stroke="#cbd5e1" strokeWidth={1 / zoom} cornerRadius={5 / zoom} />
+        <Text x={13 / zoom} y={-14 / zoom} width={width - 10 / zoom} text={text} fontSize={9 / zoom} lineHeight={1.2} fill="#263247" />
+      </Group>;
+    })}
+  </>;
+});
+
+export function SimulationCanvas({ layout, patients, staff, queues, pressures, colours, highlight, overlays, selectedId, fitSignal, time, onSelect, onPause }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
-  const lastTick = useRef<number | null>(null);
-  const [size, setSize] = useState({ width: 940, height: 640 });
+  const [size, setSize] = useState({ width: 980, height: 640 });
   const [zoom, setZoom] = useState(1);
-  const [view, setView] = useState({ x: 20, y: 20 });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showMetrics, setShowMetrics] = useState(true);
-  const pixelsPerMetre = Math.min((size.width - 40) / layout.canvas_width_m, (size.height - 40) / layout.canvas_height_m);
+  const [view, setView] = useState({ x: 16, y: 16 });
+  const pixelsPerMetre = Math.min((size.width - 32) / layout.canvas_width_m, (size.height - 32) / layout.canvas_height_m);
 
   useEffect(() => {
     if (!hostRef.current) return;
-    const observer = new ResizeObserver(([entry]) => setSize({ width: Math.max(520, entry.contentRect.width), height: Math.max(520, entry.contentRect.height) }));
-    observer.observe(hostRef.current); return () => observer.disconnect();
+    const observer = new ResizeObserver(([entry]) => setSize({ width: Math.max(560, entry.contentRect.width), height: Math.max(540, entry.contentRect.height) }));
+    observer.observe(hostRef.current);
+    return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    if (!playing) { lastTick.current = null; return; }
-    let request = 0;
-    const tick = (now: number) => {
-      const previous = lastTick.current ?? now;
-      lastTick.current = now;
-      const next = Math.min(timeline.duration, time + ((now - previous) / 1000) * speed);
-      onTime(next);
-      if (next >= timeline.duration) onPlaying(false); else request = requestAnimationFrame(tick);
-    };
-    request = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(request);
-  }, [onPlaying, onTime, playing, speed, time, timeline.duration]);
-
-  const patients = useMemo(() => timeline.patients.map((entity) => entityAtTime(entity, time)).filter((entity): entity is RenderedEntity => entity !== null), [time, timeline.patients]);
-  const staff = useMemo(() => timeline.staff.map((entity) => entityAtTime(entity, time)).filter((entity): entity is RenderedEntity => entity !== null), [time, timeline.staff]);
-  const occupied = useMemo(() => new Map(patients.filter((patient) => patient.seat_id).map((patient) => [patient.seat_id, patient.id])), [patients]);
-  const selected = [...patients, ...staff].find((entity) => entity.id === selectedId);
-  const eventTimes = useMemo(() => Array.from(new Set([...timeline.patients, ...timeline.staff].flatMap((entity) => entity.keyframes.map((frame) => frame.time)))).sort((a, b) => a - b), [timeline]);
-
   const fit = useCallback(() => {
-    const next = Math.min((size.width - 40) / (layout.canvas_width_m * pixelsPerMetre), (size.height - 40) / (layout.canvas_height_m * pixelsPerMetre));
-    setZoom(next); setView({ x: (size.width - layout.canvas_width_m * pixelsPerMetre * next) / 2, y: (size.height - layout.canvas_height_m * pixelsPerMetre * next) / 2 });
+    setZoom(1);
+    setView({ x: (size.width - layout.canvas_width_m * pixelsPerMetre) / 2, y: (size.height - layout.canvas_height_m * pixelsPerMetre) / 2 });
   }, [layout.canvas_height_m, layout.canvas_width_m, pixelsPerMetre, size]);
+  useEffect(() => { fit(); }, [fit, fitSignal]);
 
   const onWheel = (event: KonvaEventObject<WheelEvent>) => {
-    event.evt.preventDefault(); const stage = stageRef.current; const pointer = stage?.getPointerPosition(); if (!pointer) return;
+    event.evt.preventDefault();
+    const pointer = stageRef.current?.getPointerPosition();
+    if (!pointer) return;
     const world = { x: (pointer.x - view.x) / zoom, y: (pointer.y - view.y) / zoom };
-    const next = clamp(zoom * (event.evt.deltaY > 0 ? 0.9 : 1.1), 0.35, 4);
-    setZoom(next); setView({ x: pointer.x - world.x * next, y: pointer.y - world.y * next });
+    const next = clamp(zoom * (event.evt.deltaY > 0 ? .9 : 1.1), .35, 4);
+    setZoom(next);
+    setView({ x: pointer.x - world.x * next, y: pointer.y - world.y * next });
   };
 
+  const occupied = useMemo(() => new Map(patients.filter((patient) => patient.seat_id).map((patient) => [String(patient.seat_id), patient.id])), [patients]);
+  const occupancy = useMemo(() => [...patients.filter((entity) => entity.state !== "discharged"), ...staff].reduce<Record<string, number>>((counts, entity) => {
+    if (entity.department_id) counts[String(entity.department_id)] = (counts[String(entity.department_id)] ?? 0) + 1;
+    return counts;
+  }, {}), [patients, staff]);
+  const satisfaction = useMemo(() => {
+    const totals: Record<string, { total: number; count: number }> = {};
+    patients.forEach((patient) => {
+      if (!patient.department_id) return;
+      const key = String(patient.department_id);
+      const current = totals[key] ?? { total: 0, count: 0 };
+      totals[key] = { total: current.total + Number(patient.satisfaction ?? 80), count: current.count + 1 };
+    });
+    return Object.fromEntries(Object.entries(totals).map(([key, item]) => [key, item.total / item.count]));
+  }, [patients]);
+
+  const select = (id: string) => { onPause(); onSelect(id); };
   const drawEntity = (entity: RenderedEntity) => {
-    const x = entity.x_m * pixelsPerMetre; const y = entity.y_m * pixelsPerMetre; const radius = Math.max(5, pixelsPerMetre * 0.2);
+    const x = entity.x_m * pixelsPerMetre;
+    const y = entity.y_m * pixelsPerMetre;
+    const radius = Math.max(5, Math.min(9, pixelsPerMetre * .2));
     const dimmed = Boolean(highlight && entity.role === "patient" && entity.state !== highlight);
-    const common = { opacity: dimmed ? 0.18 : 1, onClick: () => { onPlaying(false); setSelectedId(entity.id); }, onTap: () => { onPlaying(false); setSelectedId(entity.id); } };
-    return <Group key={entity.id} x={x} y={y} {...common}>
-      {entity.role === "patient" && <Circle radius={radius} fill={colours[entity.state] ?? "#64748b"} stroke={entity.border ?? "#334155"} strokeWidth={3 / zoom} />}
-      {entity.role === "nurse" && <RegularPolygon sides={3} radius={radius * 1.15} fill="#22c55e" stroke="#14532d" strokeWidth={2 / zoom} />}
-      {entity.role === "doctor" && <Rect x={-radius} y={-radius} width={radius * 2} height={radius * 2} fill="#1e3a8a" stroke="#0f172a" strokeWidth={2 / zoom} />}
-      {entity.role === "patient" && entity.satisfaction_event && time - Number(entity.satisfaction_event.time) <= 2 && <Text x={radius + 3} y={radius + 2} text={`${Number(entity.satisfaction_event.score_change) > 0 ? "+" : ""}${entity.satisfaction_event.score_change} ${entity.satisfaction_event.event}`} fill="#b91c1c" fontSize={10 / zoom} />}
+    const active = selectedId === entity.id;
+    return <Group key={entity.id} x={x} y={y} opacity={dimmed ? .14 : 1} onClick={() => select(entity.id)} onTap={() => select(entity.id)}>
+      {entity.role === "patient" && <Circle radius={radius} fill={colours[entity.state] ?? "#64748b"} stroke={active ? "#0ea5e9" : entity.border ?? "#334155"} strokeWidth={(active ? 4 : 3) / zoom} shadowColor={active ? "#0ea5e9" : undefined} shadowBlur={active ? 8 / zoom : 0} />}
+      {entity.role === "nurse" && <RegularPolygon sides={3} radius={radius * 1.18} fill="#22c55e" stroke={active ? "#0ea5e9" : "#14532d"} strokeWidth={(active ? 4 : 2) / zoom} />}
+      {entity.role === "doctor" && <Rect x={-radius} y={-radius} width={radius * 2} height={radius * 2} fill="#1e3a8a" stroke={active ? "#0ea5e9" : "#0f172a"} strokeWidth={(active ? 4 : 2) / zoom} cornerRadius={1.5 / zoom} />}
+      {overlays.patientIds && entity.role === "patient" && <Text x={radius + 2 / zoom} y={-radius} text={entity.id} fontSize={8 / zoom} fill="#172033" />}
+      {entity.role === "patient" && entity.satisfaction_event && time - Number(entity.satisfaction_event.time) <= 2 && <Text x={radius + 3 / zoom} y={radius + 2 / zoom} text={`${Number(entity.satisfaction_event.score_change) > 0 ? "+" : ""}${entity.satisfaction_event.score_change} ${String(entity.satisfaction_event.event).replaceAll("_", " ")}`} fill="#b91c1c" fontSize={9 / zoom} />}
     </Group>;
   };
 
-  const counts = patients.reduce<Record<string, number>>((result, patient) => ({ ...result, [patient.state]: (result[patient.state] ?? 0) + 1 }), {});
-  const inside = patients.filter((patient) => patient.state !== "discharged");
-  const availableSeats = layout.seats.filter((seat) => seat.available && !occupied.has(seat.id)).length;
-  const averageSatisfaction = inside.length ? inside.reduce((total, patient) => total + Number(patient.satisfaction ?? 80), 0) / inside.length : 0;
-  const doctorCapacity = timeline.resource_capacity?.doctors ?? staff.filter((entity) => entity.role === "doctor").length;
-  const doctorBusy = (timeline.resource_intervals?.doctors ?? []).reduce((total, [start, end]) => total + (start < time ? Math.max(0, Math.min(time, end) - start) : 0), 0);
-  const doctorUtilisation = doctorCapacity > 0 && time > 0 ? doctorBusy / (doctorCapacity * time) : 0;
-
-  return <div className="simulation-shell">
-    <div className="simulation-toolbar"><button onClick={fit}>Fit to screen</button><button onClick={() => { setZoom(1); setView({ x: 20, y: 20 }); }}>Reset view</button><label className="check"><input type="checkbox" checked={showMetrics} onChange={(event) => setShowMetrics(event.target.checked)} /> Metrics overlay</label></div>
-    <TimelineControls playing={playing} time={time} duration={timeline.duration} speed={speed} eventTimes={eventTimes} onPlaying={onPlaying} onTime={onTime} onSpeed={onSpeed} />
-    <div className="simulation-body"><div className="canvas-host" ref={hostRef}>
-      <Stage ref={stageRef} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={zoom} scaleY={zoom} draggable onDragEnd={(event) => { if (event.target === stageRef.current) setView({ x: event.target.x(), y: event.target.y() }); }} onWheel={onWheel} onMouseDown={(event) => { if (event.target === stageRef.current) setSelectedId(null); }}>
-        <Layer>
-          <Rect width={layout.canvas_width_m * pixelsPerMetre} height={layout.canvas_height_m * pixelsPerMetre} fill="#ffffff" stroke="#0f172a" strokeWidth={2 / zoom} />
-          {layout.departments.map((department) => <Group key={department.id}><Rect x={department.x_m * pixelsPerMetre} y={department.y_m * pixelsPerMetre} width={department.width_m * pixelsPerMetre} height={department.height_m * pixelsPerMetre} fill={department.fill} stroke={department.border} strokeWidth={1.5 / zoom} /><Text x={(department.x_m + 0.15) * pixelsPerMetre} y={(department.y_m + 0.12) * pixelsPerMetre} text={department.name} fontSize={Math.max(8, pixelsPerMetre * 0.26)} fill="#0f172a" /></Group>)}
-          {layout.queue_points.map((point) => <Line key={point.id} points={[point.x_m * pixelsPerMetre - 4, point.y_m * pixelsPerMetre, point.x_m * pixelsPerMetre + 4, point.y_m * pixelsPerMetre]} stroke="#64748b" dash={[2, 2]} />)}
-          {layout.seats.map((seat) => <Rect key={seat.id} x={seat.x_m * pixelsPerMetre} y={seat.y_m * pixelsPerMetre} width={0.35 * pixelsPerMetre} height={0.35 * pixelsPerMetre} offsetX={0.175 * pixelsPerMetre} offsetY={0.175 * pixelsPerMetre} rotation={seat.rotation_deg} fill={!seat.available ? "#94a3b8" : occupied.has(seat.id) ? "#fb7185" : "#ffffff"} stroke="#475569" strokeWidth={1 / zoom} />)}
-          {staff.map(drawEntity)}{patients.map(drawEntity)}
-          {showMetrics && <Group x={10 / zoom} y={10 / zoom} scaleX={1 / zoom} scaleY={1 / zoom}><Rect width={720} height={32} fill="#ffffff" opacity={0.92} cornerRadius={6} stroke="#cbd5e1" /><Text x={10} y={9} text={`Time ${time.toFixed(1)} min · Inside ${inside.length} · Triage ${counts.waiting_triage ?? 0} · Initial ${counts.waiting_initial_consultation ?? 0} · Return ${counts.waiting_return_consultation ?? 0} · Seats ${availableSeats} · Satisfaction ${averageSatisfaction.toFixed(1)} · Doctors ${(doctorUtilisation * 100).toFixed(0)}%`} fontSize={12} fill="#0f172a" /></Group>}
-        </Layer>
-      </Stage>
-    </div>
-        <aside className="entity-panel"><h3>Selected person</h3>{!selected ? <p>Pause and select a patient, nurse, or doctor.</p> : <><h4>{selected.id}</h4><dl><dt>Role</dt><dd>{selected.role}</dd><dt>State</dt><dd>{selected.state}</dd><dt>Department</dt><dd>{String(selected.department_id ?? "—")}</dd>{selected.role === "patient" ? <><dt>Satisfaction</dt><dd>{Number(selected.satisfaction ?? 80).toFixed(0)}</dd><dt>Seat</dt><dd>{String(selected.seat_id ?? "—")}</dd><dt>Appointment</dt><dd>{String(selected.details?.appointment_time ?? "—")}</dd><dt>First wait</dt><dd>{Number(selected.details?.first_waiting_time ?? 0).toFixed(1)} min</dd><dt>Return wait</dt><dd>{Number(selected.details?.return_waiting_time ?? 0).toFixed(1)} min</dd><dt>Total wait</dt><dd>{Number(selected.details?.total_waiting_time ?? 0).toFixed(1)} min</dd><dt>Next destination</dt><dd>{String(selected.department_id ?? "—")}</dd></> : <><dt>Station</dt><dd>{String(selected.station_id ?? "—")}</dd><dt>Status</dt><dd>{selected.state}</dd><dt>Current patient</dt><dd>{String(selected.current_patient ?? "—")}</dd><dt>Utilisation so far</dt><dd>{(Number(selected.utilisation_so_far ?? 0) * 100).toFixed(1)}%</dd></>}</dl>{selected.role === "patient" && <details><summary>Satisfaction events</summary><pre>{JSON.stringify(selected.details?.satisfaction_events ?? [], null, 2)}</pre></details>}</>}</aside>
-    </div>
+  return <div className="simulation-map" ref={hostRef}>
+    <Stage ref={stageRef} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={zoom} scaleY={zoom} draggable
+      onDragEnd={(event) => { if (event.target === stageRef.current) setView({ x: event.target.x(), y: event.target.y() }); }}
+      onWheel={onWheel} onMouseDown={(event) => { if (event.target === stageRef.current) onSelect(null); }}>
+      <Layer listening={false}>
+        <StaticFloorPlan layout={layout} pixelsPerMetre={pixelsPerMetre} zoom={zoom} pressures={pressures} queues={queues} overlays={overlays} occupancy={occupancy} satisfaction={satisfaction} />
+        {layout.seats.map((seat) => <Rect key={seat.id} x={seat.x_m * pixelsPerMetre} y={seat.y_m * pixelsPerMetre} width={.36 * pixelsPerMetre} height={.36 * pixelsPerMetre} offsetX={.18 * pixelsPerMetre} offsetY={.18 * pixelsPerMetre} rotation={seat.rotation_deg} fill={!seat.available ? "#94a3b8" : occupied.has(seat.id) ? "#fb7185" : "#ffffff"} stroke="#475569" strokeWidth={1.2 / zoom} cornerRadius={2 / zoom} />)}
+      </Layer>
+      <Layer>
+        {overlays.flowTrails && patients.filter((patient) => patient.moving && patient.source_location).map((patient) => <Line key={`trail_${patient.id}`} points={[Number(patient.source_location?.x_m) * pixelsPerMetre, Number(patient.source_location?.y_m) * pixelsPerMetre, patient.x_m * pixelsPerMetre, patient.y_m * pixelsPerMetre]} stroke={colours[patient.state] ?? "#64748b"} opacity={.35} strokeWidth={3 / zoom} lineCap="round" dash={[5 / zoom, 4 / zoom]} />)}
+        {staff.map(drawEntity)}
+        {patients.map(drawEntity)}
+      </Layer>
+    </Stage>
   </div>;
 }

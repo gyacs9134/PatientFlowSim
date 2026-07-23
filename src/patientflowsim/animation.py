@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from math import hypot
 from typing import Any
 
 
@@ -44,8 +45,33 @@ def _current_keyframe(keyframes: list[dict[str, Any]], time_min: float) -> tuple
     return keyframes[current_index], previous
 
 
+def _point_along_path(path: list[dict[str, Any]], progress: float) -> tuple[float, float]:
+    """Interpolate a point along a polyline using distance-weighted segments."""
+    if not path:
+        return 0.0, 0.0
+    if len(path) == 1:
+        return float(path[0]["x_m"]), float(path[0]["y_m"])
+    lengths = [
+        hypot(float(second["x_m"]) - float(first["x_m"]), float(second["y_m"]) - float(first["y_m"]))
+        for first, second in zip(path, path[1:])
+    ]
+    total = sum(lengths)
+    if total <= 0:
+        return float(path[-1]["x_m"]), float(path[-1]["y_m"])
+    remaining = min(1.0, max(0.0, progress)) * total
+    for index, length in enumerate(lengths):
+        if remaining <= length:
+            fraction = remaining / length if length else 1.0
+            return (
+                float(path[index]["x_m"]) + (float(path[index + 1]["x_m"]) - float(path[index]["x_m"])) * fraction,
+                float(path[index]["y_m"]) + (float(path[index + 1]["y_m"]) - float(path[index]["y_m"])) * fraction,
+            )
+        remaining -= length
+    return float(path[-1]["x_m"]), float(path[-1]["y_m"])
+
+
 def interpolate_entity(entity: dict[str, Any], time_min: float) -> dict[str, Any]:
-    """Return an entity state at a simulation minute using direct linear movement."""
+    """Return an entity state at a simulation minute using waypoint movement."""
     keyframes = entity.get("keyframes", [])
     if not keyframes:
         return deepcopy(entity)
@@ -56,10 +82,11 @@ def interpolate_entity(entity: dict[str, Any], time_min: float) -> dict[str, Any
     state["visible"] = True
     travel_duration = float(current.get("travel_duration_min", 0.0))
     elapsed = time_min - float(current["time"])
-    if previous is not None and travel_duration > 0 and 0 <= elapsed < travel_duration:
+    source = current.get("source_location") or previous
+    if source is not None and travel_duration > 0 and 0 <= elapsed < travel_duration:
         progress = min(1.0, max(0.0, elapsed / travel_duration))
-        state["x_m"] = float(previous["x_m"]) + (float(current["x_m"]) - float(previous["x_m"])) * progress
-        state["y_m"] = float(previous["y_m"]) + (float(current["y_m"]) - float(previous["y_m"])) * progress
+        path = current.get("path") or [source, current]
+        state["x_m"], state["y_m"] = _point_along_path(path, progress)
         state["moving"] = True
     else:
         state["moving"] = False

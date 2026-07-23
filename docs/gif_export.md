@@ -1,9 +1,7 @@
 # GIF export
 
-GIF export uses the same saved layout and Python spatial timeline as interactive playback. Pillow draws departments, seats, patient circles, nurse triangles, doctor squares, workflow colours, satisfaction borders, optional IDs and score labels, and optional fixed legend and metrics panels. ImageIO encodes the rendered frames as a downloadable GIF.
+The results screen exports the full run or a selected replay period. Users choose start/end time, 10/15/20 FPS, dimensions, playback speed, loop behaviour, and inclusion of IDs, room dimensions, legend, metrics, and satisfaction labels.
 
-Users choose the complete run or a start/end range, playback speed, 10/15/20 FPS, output dimensions, looping, and optional overlays. Simulation time is sampled evenly. `max_frames` caps long clinic days, so lowering the cap shortens export time and memory use without changing the underlying simulation. A separate pixel-count guard rejects unsafe combinations of frame count and resolution with a readable error.
+Python Pillow renders the saved JSON layout and the same prepared animation timeline used by the browser. `imageio` encodes frames when available; Pillow is a tested fallback. Rooms, marker shapes/colours, satisfaction borders, seat occupancy, time, live metrics, and optional legend are preserved.
 
-GIFs are presentation outputs only. They do not contain editable layout metadata; export or save the JSON layout separately. The renderer is intentionally diagrammatic rather than an architectural rasterizer, and it uses direct station-to-station movement without wall-aware pathfinding.
-
-For automation, call `patientflowsim.gif_export.render_gif(layout, timeline, GifExportConfig(...))`. The return value is GIF bytes suitable for a file, HTTP response, or Streamlit download button. An optional progress callback receives values from 0 to 1 after each frame.
+Requested frames are evenly sampled and capped. A pixel-count guard rejects unsafe combinations before allocation, and Streamlit reports rendering progress. GIF files are recordings only and never replace editable layout JSON.

@@ -58,9 +58,15 @@ def stable_queue_position(layout: HospitalLayout, queue_type: str, index: int, s
     point = next((candidate for candidate in layout.queue_points if candidate.point_type == queue_type), None)
     if point is None:
         point = LayoutPoint(f"fallback_{queue_type}", 1.0, 1.0, queue_type)
+    if index < 0:
+        raise ValueError("Queue position index cannot be negative")
     if point.direction == "horizontal":
-        return min(layout.canvas_width_m, point.x_m + index * spacing_m), point.y_m
-    return point.x_m, min(layout.canvas_height_m, point.y_m + index * spacing_m)
+        columns = max(1, int((layout.canvas_width_m - point.x_m) // spacing_m) + 1)
+        column, row = index % columns, index // columns
+        return point.x_m + column * spacing_m, (point.y_m + row * spacing_m) % layout.canvas_height_m
+    rows = max(1, int((layout.canvas_height_m - point.y_m) // spacing_m) + 1)
+    row, column = index % rows, index // rows
+    return (point.x_m + column * spacing_m) % layout.canvas_width_m, point.y_m + row * spacing_m
 
 
 def _patient_number(patient_id: str) -> int:
@@ -109,6 +115,15 @@ def _travel_minutes(previous: dict[str, Any] | None, x_m: float, y_m: float, wal
     return distance / (walking_speed_m_s * 60.0)
 
 
+def _path_minutes(path: list[dict[str, Any]], walking_speed_m_s: float) -> float:
+    """Return direct waypoint travel time in simulation minutes."""
+    distance = sum(
+        hypot(float(second["x_m"]) - float(first["x_m"]), float(second["y_m"]) - float(first["y_m"]))
+        for first, second in zip(path, path[1:])
+    )
+    return distance / (walking_speed_m_s * 60.0)
+
+
 def prepare_spatial_timeline(
     events: pd.DataFrame,
     patients: pd.DataFrame,
@@ -136,28 +151,45 @@ def prepare_spatial_timeline(
     keyframes: dict[str, list[dict[str, Any]]] = defaultdict(list)
     queues: dict[str, list[str]] = defaultdict(list)
     patient_queue: dict[str, str] = {}
+    queue_joined_at: dict[tuple[str, str], float] = {}
     assigned_seats: dict[str, str] = {}
     seat_users: dict[str, str] = {}
     return_phase: set[str] = set()
 
     def add_keyframe(patient_id: str, time: float, state: str, x_m: float, y_m: float, department_id: str | None, **extra: Any) -> None:
         previous = keyframes[patient_id][-1] if keyframes[patient_id] else None
+        event_time = float(time)
+        display_time = max(
+            event_time,
+            float(previous.get("movement_end_time", previous["time"])) if previous else event_time,
+        )
         score = float(extra.pop("satisfaction", previous.get("satisfaction", 80) if previous else 80))
         travel_duration = extra.pop("travel_duration_min", None)
+        duration = (
+            _travel_minutes(previous, x_m, y_m, walking_speed_m_s)
+            if travel_duration is None
+            else float(travel_duration)
+        )
+        source = (
+            {"x_m": float(previous["x_m"]), "y_m": float(previous["y_m"]), "department_id": previous.get("department_id")}
+            if previous
+            else {"x_m": float(x_m), "y_m": float(y_m), "department_id": department_id}
+        )
         keyframe = {
-            "time": float(time),
+            "time": display_time,
+            "simulation_timestamp": event_time,
             "x_m": round(float(x_m), 5),
             "y_m": round(float(y_m), 5),
             "state": state,
             "department_id": department_id,
             "satisfaction": score,
             "seat_id": extra.pop("seat_id", assigned_seats.get(patient_id)),
-            "travel_duration_min": round(
-                _travel_minutes(previous, x_m, y_m, walking_speed_m_s)
-                if travel_duration is None
-                else float(travel_duration),
-                6,
-            ),
+            "travel_duration_min": round(duration, 6),
+            "movement_start_time": display_time,
+            "movement_end_time": display_time + round(duration, 6),
+            "source_location": source,
+            "destination_location": {"x_m": float(x_m), "y_m": float(y_m), "department_id": department_id},
+            "path": [source, {"x_m": float(x_m), "y_m": float(y_m), "department_id": department_id}],
             **extra,
         }
         keyframes[patient_id].append(keyframe)
@@ -171,7 +203,20 @@ def prepare_spatial_timeline(
                 continue
             x_m, y_m = stable_queue_position(layout, queue_type, index)
             previous = keyframes[queued_patient][-1]
-            add_keyframe(queued_patient, time, previous["state"], x_m, y_m, previous.get("department_id"), queue_position=index)
+            if queued_patient in assigned_seats:
+                continue
+            add_keyframe(
+                queued_patient,
+                time,
+                previous["state"],
+                x_m,
+                y_m,
+                previous.get("department_id"),
+                queue_position=index,
+                queue_type=queue_type,
+                queue_entered_time=queue_joined_at.get((queued_patient, queue_type), time),
+                event_type="queue_position_changed",
+            )
 
     for event in ordered.itertuples(index=False):
         patient_id = str(event.patient_id)
@@ -195,6 +240,7 @@ def prepare_spatial_timeline(
         if join_queue:
             if patient_id not in queues[join_queue]:
                 queues[join_queue].append(patient_id)
+                queue_joined_at[(patient_id, join_queue)] = time
             patient_queue[patient_id] = join_queue
 
         previous_state = keyframes[patient_id][-1]["state"] if keyframes[patient_id] else "arrived_check_in"
@@ -208,7 +254,17 @@ def prepare_spatial_timeline(
                 assigned_seats[patient_id] = selected.id
                 seat_users[selected.id] = patient_id
                 state = "waiting_return_consultation" if patient_id in return_phase else "waiting_initial_consultation"
-                add_keyframe(patient_id, time, state, selected.x_m, selected.y_m, selected.waiting_area_id, satisfaction=satisfaction, seat_id=selected.id)
+                add_keyframe(
+                    patient_id,
+                    time,
+                    state,
+                    selected.x_m,
+                    selected.y_m,
+                    selected.waiting_area_id,
+                    satisfaction=satisfaction,
+                    seat_id=selected.id,
+                    event_type=event_type,
+                )
             continue
         if event_type == "seat_released":
             seat_id = assigned_seats.pop(patient_id, None)
@@ -216,19 +272,24 @@ def prepare_spatial_timeline(
                 seat_users.pop(seat_id, None)
             if keyframes[patient_id]:
                 previous = keyframes[patient_id][-1]
-                add_keyframe(patient_id, time, previous["state"], previous["x_m"], previous["y_m"], previous.get("department_id"), satisfaction=satisfaction, seat_id=None)
+                add_keyframe(patient_id, time, previous["state"], previous["x_m"], previous["y_m"], previous.get("department_id"), satisfaction=satisfaction, seat_id=None, event_type=event_type)
             continue
         if event_type in {"no_seat_available", "satisfaction_changed"}:
             if keyframes[patient_id]:
                 previous = keyframes[patient_id][-1]
-                add_keyframe(patient_id, time, previous["state"], previous["x_m"], previous["y_m"], previous.get("department_id"), satisfaction=satisfaction, label=event_type)
+                add_keyframe(patient_id, time, previous["state"], previous["x_m"], previous["y_m"], previous.get("department_id"), satisfaction=satisfaction, label=event_type, event_type=event_type)
             continue
 
         department_id: str | None = None
+        station: ResourceStation | None = None
         if join_queue:
-            x_m, y_m = stable_queue_position(layout, join_queue, queues[join_queue].index(patient_id))
             point = next((point for point in layout.queue_points if point.point_type == join_queue), None)
-            department_id = point.department_id if point else None
+            if patient_id in assigned_seats:
+                selected_seat = next(seat for seat in layout.seats if seat.id == assigned_seats[patient_id])
+                x_m, y_m, department_id = selected_seat.x_m, selected_seat.y_m, selected_seat.waiting_area_id
+            else:
+                x_m, y_m = stable_queue_position(layout, join_queue, queues[join_queue].index(patient_id))
+                department_id = point.department_id if point else None
         elif event_type == "patient_arrived":
             x_m, y_m, department_id = _point_position(layout.entry_points, (0.5, layout.canvas_height_m / 2))
         elif event_type in {"first_check_in_started", "return_check_in_started"}:
@@ -256,7 +317,46 @@ def prepare_spatial_timeline(
         else:
             x_m, y_m, department_id = _point_position(layout.entry_points, (0.5, layout.canvas_height_m / 2))
 
-        add_keyframe(patient_id, time, state, x_m, y_m, department_id, satisfaction=satisfaction, queue_position=(queues[join_queue].index(patient_id) if join_queue else None))
+        station_id = station.id if station is not None else None
+        movement: dict[str, Any] = {}
+        if event_type == "patient_arrived":
+            entry_x, entry_y, entry_department = _point_position(layout.entry_points, (0.5, layout.canvas_height_m / 2))
+            outside_x = -0.6 if entry_x <= layout.canvas_width_m / 2 else layout.canvas_width_m + 0.6
+            source = {"x_m": outside_x, "y_m": entry_y, "department_id": None}
+            path = [source, {"x_m": entry_x, "y_m": entry_y, "department_id": entry_department}, {"x_m": x_m, "y_m": y_m, "department_id": department_id}]
+            movement = {
+                "source_location": source,
+                "path": path,
+                "travel_duration_min": _path_minutes(path, walking_speed_m_s),
+            }
+        elif event_type == "patient_discharged" and keyframes[patient_id]:
+            exit_x, exit_y, exit_department = x_m, y_m, department_id
+            outside_x = -0.6 if exit_x <= layout.canvas_width_m / 2 else layout.canvas_width_m + 0.6
+            previous = keyframes[patient_id][-1]
+            source = {"x_m": previous["x_m"], "y_m": previous["y_m"], "department_id": previous.get("department_id")}
+            x_m, y_m = outside_x, exit_y
+            path = [source, {"x_m": exit_x, "y_m": exit_y, "department_id": exit_department}, {"x_m": x_m, "y_m": y_m, "department_id": None}]
+            movement = {
+                "source_location": source,
+                "destination_location": path[-1],
+                "path": path,
+                "travel_duration_min": _path_minutes(path, walking_speed_m_s),
+            }
+        add_keyframe(
+            patient_id,
+            time,
+            state,
+            x_m,
+            y_m,
+            department_id,
+            satisfaction=satisfaction,
+            queue_position=(queues[join_queue].index(patient_id) if join_queue else None),
+            queue_type=join_queue,
+            queue_entered_time=(queue_joined_at.get((patient_id, join_queue), time) if join_queue else None),
+            resource_station_id=station_id,
+            event_type=event_type,
+            **movement,
+        )
 
     for patient_id, row in patient_rows.items():
         patient_keyframes = keyframes.get(patient_id)
@@ -268,7 +368,11 @@ def prepare_spatial_timeline(
             event_time = float(satisfaction_event.get("time", 0))
             running_score = max(0.0, min(100.0, running_score + float(satisfaction_event.get("score_change", 0))))
             matching = next(
-                (keyframe for keyframe in reversed(patient_keyframes) if abs(float(keyframe["time"]) - event_time) < 1e-6),
+                (
+                    keyframe
+                    for keyframe in reversed(patient_keyframes)
+                    if abs(float(keyframe.get("simulation_timestamp", keyframe["time"])) - event_time) < 1e-6
+                ),
                 None,
             )
             if matching is not None:
@@ -277,8 +381,12 @@ def prepare_spatial_timeline(
                 matching["satisfaction"] = running_score
                 continue
             prior = max(
-                (keyframe for keyframe in patient_keyframes if keyframe["time"] <= event_time),
-                key=lambda item: item["time"],
+                (
+                    keyframe
+                    for keyframe in patient_keyframes
+                    if float(keyframe.get("simulation_timestamp", keyframe["time"])) <= event_time
+                ),
+                key=lambda item: float(item.get("simulation_timestamp", item["time"])),
                 default=patient_keyframes[0],
             )
             add_keyframe(
@@ -298,7 +406,11 @@ def prepare_spatial_timeline(
         event_index = 0
         running_score = float(row.get("initial_satisfaction_score", 80) or 80)
         for keyframe in patient_keyframes:
-            while event_index < len(satisfaction_events) and float(satisfaction_events[event_index].get("time", 0)) <= float(keyframe["time"]) + 1e-6:
+            while (
+                event_index < len(satisfaction_events)
+                and float(satisfaction_events[event_index].get("time", 0))
+                <= float(keyframe.get("simulation_timestamp", keyframe["time"])) + 1e-6
+            ):
                 running_score = max(
                     0.0,
                     min(100.0, running_score + float(satisfaction_events[event_index].get("score_change", 0))),
@@ -323,9 +435,13 @@ def prepare_spatial_timeline(
                 "satisfaction_events": _normalise_satisfaction_events(row.get("satisfaction_events")),
             },
         })
+    visual_duration = max(
+        (float(frame.get("movement_end_time", frame["time"])) for frames in keyframes.values() for frame in frames),
+        default=float(ordered["time"].max()),
+    )
     return {
         "schema_version": 1,
-        "duration": float(ordered["time"].max()),
+        "duration": max(float(ordered["time"].max()), visual_duration),
         "walking_speed_m_s": float(walking_speed_m_s),
         "patients": patient_entities,
         "staff": _staff_entities(layout, ordered),
@@ -341,6 +457,9 @@ def _resource_capacity(layout: HospitalLayout) -> dict[str, int]:
     return {
         "doctors": sum(station.station_type == "doctor" for station in layout.resource_stations),
         "triage_nurses": sum(station.station_type == "triage" for station in layout.resource_stations),
+        "check_in": sum(station.station_type == "check-in" for station in layout.resource_stations),
+        "laboratory": sum(station.station_type == "laboratory" for station in layout.resource_stations),
+        "imaging": sum(station.station_type == "imaging" for station in layout.resource_stations),
     }
 
 
@@ -353,6 +472,14 @@ def _resource_intervals(events: pd.DataFrame) -> dict[str, list[list[float]]]:
             "return_consultation_completed": "return",
         },
         "triage_nurses": {"triage_started": "triage", "triage_completed": "triage"},
+        "check_in": {
+            "first_check_in_started": "first",
+            "first_check_in_completed": "first",
+            "return_check_in_started": "return",
+            "return_check_in_completed": "return",
+        },
+        "laboratory": {"examination_started": "laboratory", "examination_completed": "laboratory"},
+        "imaging": {"examination_started": "imaging", "examination_completed": "imaging"},
     }
     intervals: dict[str, list[list[float]]] = {name: [] for name in event_groups}
     for resource_name, mapping in event_groups.items():
@@ -360,6 +487,8 @@ def _resource_intervals(events: pd.DataFrame) -> dict[str, list[list[float]]]:
         for event in events.itertuples(index=False):
             event_type = str(event.event_type)
             if event_type not in mapping:
+                continue
+            if resource_name in {"laboratory", "imaging"} and str(event.department) != resource_name:
                 continue
             key = (str(event.patient_id), mapping[event_type])
             if event_type.endswith("_started"):

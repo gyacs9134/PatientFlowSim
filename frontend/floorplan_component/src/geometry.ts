@@ -1,4 +1,4 @@
-import type { AnimatedEntity, Department, HospitalLayout, Keyframe, RenderedEntity } from "./types";
+import type { AnimatedEntity, Department, HospitalLayout, Keyframe, RenderedEntity, WorldPoint } from "./types";
 
 export const SHAPES = { patient: "circle", nurse: "triangle", doctor: "square" } as const;
 export const SATISFACTION_BORDERS = { normal: "#334155", warning: "#eab308", critical: "#dc2626" } as const;
@@ -40,15 +40,42 @@ export function entityAtTime(entity: AnimatedEntity, time: number): RenderedEnti
   const rendered: RenderedEntity = { ...entity, ...current, moving: false };
   const duration = current.travel_duration_min ?? 0;
   const elapsed = time - current.time;
-  if (previous && duration > 0 && elapsed >= 0 && elapsed < duration) {
+  const source = current.source_location ?? previous;
+  if (source && duration > 0 && elapsed >= 0 && elapsed < duration) {
     const progress = clamp(elapsed / duration, 0, 1);
-    rendered.x_m = previous.x_m + (current.x_m - previous.x_m) * progress;
-    rendered.y_m = previous.y_m + (current.y_m - previous.y_m) * progress;
+    const point = pointAlongPath(current.path?.length ? current.path : [source, current], progress);
+    rendered.x_m = point.x_m;
+    rendered.y_m = point.y_m;
     rendered.moving = true;
   }
   rendered.shape = SHAPES[entity.role];
   if (entity.role === "patient") rendered.border = satisfactionBorder(rendered.satisfaction);
   return rendered;
+}
+
+export function pointAlongPath(path: WorldPoint[], progress: number): WorldPoint {
+  if (!path.length) return { x_m: 0, y_m: 0 };
+  if (path.length === 1) return path[0];
+  const lengths = path.slice(1).map((point, index) => Math.hypot(point.x_m - path[index].x_m, point.y_m - path[index].y_m));
+  const total = lengths.reduce((sum, value) => sum + value, 0);
+  if (total === 0) return path[path.length - 1];
+  let target = clamp(progress, 0, 1) * total;
+  for (let index = 0; index < lengths.length; index += 1) {
+    if (target <= lengths[index]) {
+      const fraction = lengths[index] === 0 ? 1 : target / lengths[index];
+      return {
+        x_m: path[index].x_m + (path[index + 1].x_m - path[index].x_m) * fraction,
+        y_m: path[index].y_m + (path[index + 1].y_m - path[index].y_m) * fraction,
+        department_id: path[index + 1].department_id,
+      };
+    }
+    target -= lengths[index];
+  }
+  return path[path.length - 1];
+}
+
+export function nextKeyframe(entity: AnimatedEntity, time: number): Keyframe | null {
+  return entity.keyframes.find((frame) => frame.time > time + 0.000001) ?? null;
 }
 
 export const stateCounts = (entities: RenderedEntity[]): Record<string, number> =>

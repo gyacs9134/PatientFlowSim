@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { entityAtTime, satisfactionBorder, SHAPES, snap, stateCounts } from "./geometry";
+import { entityAtTime, pointAlongPath, satisfactionBorder, SHAPES, snap, stateCounts } from "./geometry";
 import type { AnimatedEntity } from "./types";
 
 const patient: AnimatedEntity = {
@@ -18,4 +18,7 @@ describe("spatial geometry rules", () => {
   });
   it("snaps only when enabled", () => { expect(snap(1.24, 0.5, true)).toBe(1); expect(snap(1.24, 0.5, false)).toBe(1.24); });
   it("derives live legend counts", () => expect(stateCounts([entityAtTime(patient, 2)!])).toEqual({ arrived_check_in: 1 }));
+  it("interpolates along stable waypoints", () => {
+    expect(pointAlongPath([{ x_m: 0, y_m: 0 }, { x_m: 2, y_m: 0 }, { x_m: 2, y_m: 2 }], .75)).toMatchObject({ x_m: 2, y_m: 1 });
+  });
 });
